@@ -18,11 +18,25 @@ import AccountSettingsModal from '@/react-app/components/AccountSettingsModal';
 import { useSequences, useSequenceData } from '@/react-app/hooks/useApi';
 import { EmailBlock, EmailBlockTypeT, BLOCK_TYPE_CONFIG, Sequence } from '@/shared/types';
 import { EMAIL_TEMPLATES } from '@/react-app/data/emailTemplates';
+import * as mockAuth from '@/react-app/utils/mockAuth';
 
 export default function HomePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { user, redirectToLogin, logout, isPending } = useAuth();
+  const [mockUser, setMockUser] = useState<mockAuth.MockUser | null>(() => mockAuth.getCurrentUser());
+  const effectiveUser = user || mockUser;
+
+  // Listen for other tabs updating mock auth state
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'mock_current_user_v1') {
+        setMockUser(mockAuth.getCurrentUser());
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
   
   const [selectedSequenceId, setSelectedSequenceId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -80,7 +94,7 @@ export default function HomePage() {
 
   // Fetch user credits
   useEffect(() => {
-    if (!user) return;
+    if (!effectiveUser) return;
     
     const fetchCredits = async () => {
       try {
@@ -98,7 +112,7 @@ export default function HomePage() {
     // Refresh credits every 30 seconds
     const interval = setInterval(fetchCredits, 30000);
     return () => clearInterval(interval);
-  }, [user]);
+  }, [effectiveUser]);
 
   const selectedSequence = sequences.find(s => s.id === selectedSequenceId) || null;
 
@@ -169,8 +183,8 @@ export default function HomePage() {
     if (!selectedSequenceId) return;
 
     // Show connection modal for advanced logic
-    const sourceBlock = (blocks || []).find((b: any) => b.id === sourceId);
-    const targetBlock = (blocks || []).find((b: any) => b.id === targetId);
+    const sourceBlock = (blocks || []).find((b) => b.id === sourceId);
+    const targetBlock = (blocks || []).find((b) => b.id === targetId);
     
     if (sourceBlock && targetBlock) {
       setConnectionData({
@@ -196,14 +210,21 @@ export default function HomePage() {
 
   const handleLogout = useCallback(async () => {
     try {
+      if (mockUser) {
+        mockAuth.logout();
+        setMockUser(null);
+        navigate('/');
+        return;
+      }
+
       await logout();
       navigate('/');
     } catch (error) {
       console.error('Logout failed:', error);
     }
-  }, [logout, navigate]);
+  }, [logout, navigate, mockUser]);
 
-  const handleAIGenerate = useCallback(async (content: any) => {
+  const handleAIGenerate = useCallback(async (content: Record<string, unknown>) => {
     if (!selectedSequenceId || !aiBlockType) return;
 
     try {
@@ -347,24 +368,23 @@ export default function HomePage() {
       setLoadingAuth(true);
 
       try {
-        const endpoint = isRegisterMode ? '/api/auth/register' : '/api/auth/login';
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: formEmail, password: formPassword }),
-        });
-
-        if (res.ok) {
-          // Reload to pick up new session/state
-          window.location.reload();
-          return;
+        if (isRegisterMode) {
+          const r = mockAuth.register(formEmail.trim(), formPassword);
+          if (!r.ok) {
+            setAuthError(r.error || 'Failed to register');
+            return;
+          }
+        } else {
+          const r = mockAuth.login(formEmail.trim(), formPassword);
+          if (!r.ok) {
+            setAuthError(r.error || 'Failed to login');
+            return;
+          }
         }
 
-        const data = await res.json().catch(() => ({ error: 'Unknown error' }));
-        setAuthError(data.error || 'Authentication failed');
-      } catch (err) {
-        console.error('Auth request failed:', err);
-        setAuthError('Network error - please try again');
+        // Update local mock user state and reload to mimic real session
+        setMockUser(mockAuth.getCurrentUser());
+        window.location.reload();
       } finally {
         setLoadingAuth(false);
       }
@@ -455,8 +475,8 @@ export default function HomePage() {
     );
   }
 
-  // Show login screen if not authenticated
-  if (!user) {
+  // Show login screen if not authenticated (real or mock)
+  if (!effectiveUser) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8">
@@ -582,13 +602,13 @@ export default function HomePage() {
 
             {/* User menu */}
             <div className="flex items-center gap-3">
-              <button
+                <button
                 onClick={() => setShowAccountSettings(true)}
                 className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 px-2 py-1 rounded transition-colors"
                 title="Account Settings"
               >
                 <User className="w-4 h-4" />
-                <span>{user.email}</span>
+                <span>{effectiveUser?.email}</span>
               </button>
               
               <button

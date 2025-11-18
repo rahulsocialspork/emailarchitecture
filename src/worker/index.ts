@@ -219,6 +219,119 @@ app.get("/api/users/me", authMiddleware, async (c) => {
   return c.json(c.get("user"));
 });
 
+// ===== LOCAL AUTH (register / login) for test/demo =====
+const LOCAL_SESSION_COOKIE = 'local_session_token';
+
+// Register (creates local user and session)
+app.post('/api/auth/register', async (c) => {
+  const db = c.env.DB;
+  const body = await c.req.json();
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
+
+  if (!email || !password) {
+    return c.json({ error: 'Email and password are required' }, 400);
+  }
+
+  // Check existing user
+  const existing = await db.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
+  if (existing) return c.json({ error: 'User already exists' }, 409);
+
+  const id = uuidv4();
+  const now = new Date().toISOString();
+
+  // NOTE: For demo purposes we store password in plain text. Do NOT do this in production.
+  await db.prepare('INSERT INTO users (id, email, password, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, email, password, now, now).run();
+
+  // Initialize credits
+  await db.prepare('INSERT OR REPLACE INTO user_credits (user_id, credits_balance, total_credits_used, last_updated, email) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, 10000, 0, now, email).run();
+
+  // Create session
+  const token = uuidv4();
+  const expiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(); // 60 days
+  await db.prepare('INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+    .bind(token, id, now, expiresAt).run();
+
+  setCookie(c, LOCAL_SESSION_COOKIE, token, {
+    httpOnly: true,
+    path: '/',
+    sameSite: 'lax',
+    secure: false,
+    maxAge: 60 * 24 * 60 * 60,
+  });
+
+  return c.json({ success: true });
+});
+
+// Login (creates session)
+app.post('/api/auth/login', async (c) => {
+  const db = c.env.DB;
+  const body = await c.req.json();
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
+
+  if (!email || !password) {
+    return c.json({ error: 'Email and password are required' }, 400);
+  }
+
+  const user = await db.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
+  if (!user) return c.json({ error: 'Invalid credentials' }, 401);
+  if (String(user.password) !== password) return c.json({ error: 'Invalid credentials' }, 401);
+
+  const token = uuidv4();
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(); // 60 days
+
+  await db.prepare('INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+    .bind(token, user.id, now, expiresAt).run();
+
+  setCookie(c, LOCAL_SESSION_COOKIE, token, {
+    httpOnly: true,
+    path: '/',
+    sameSite: 'lax',
+    secure: false,
+    maxAge: 60 * 24 * 60 * 60,
+  });
+
+  return c.json({ success: true });
+});
+
+// Logout (local)
+app.post('/api/auth/logout', async (c) => {
+  const db = c.env.DB;
+  const token = getCookie(c, LOCAL_SESSION_COOKIE);
+  if (token) {
+    await db.prepare('DELETE FROM user_sessions WHERE token = ?').bind(token).run();
+  }
+
+  setCookie(c, LOCAL_SESSION_COOKIE, '', {
+    httpOnly: true,
+    path: '/',
+    sameSite: 'lax',
+    secure: false,
+    maxAge: 0,
+  });
+
+  return c.json({ success: true });
+});
+
+// Get current user (local session-aware) — returns user object like authMiddleware would
+app.get('/api/auth/me', async (c) => {
+  const db = c.env.DB;
+  const token = getCookie(c, LOCAL_SESSION_COOKIE);
+  if (!token) return c.json({ user: null });
+
+  const session = await db.prepare('SELECT * FROM user_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first();
+  if (!session) return c.json({ user: null });
+
+  const user = await db.prepare('SELECT id, email FROM users WHERE id = ?').bind(session.user_id).first();
+  if (!user) return c.json({ user: null });
+
+  return c.json({ user });
+});
+
 // Get user credits
 app.get("/api/users/me/credits", authMiddleware, async (c) => {
   const db = c.env.DB;
